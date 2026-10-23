@@ -195,7 +195,6 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   margin-top: 18px;
   border-top: 1px solid var(--border);
   padding-top: 16px;
-  white-space: pre-wrap;
 }
 .content-box h3 { margin-bottom: 10px; }
 .content-box .badge {
@@ -207,7 +206,9 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   margin-left: 8px;
   font-weight: normal;
 }
-.content-box .prose { font-size: 15px; line-height: 2; }
+.content-box .prose { font-size: 15px; line-height: 1.7; }
+.content-box .prose p { margin: 0 0 6px; text-indent: 2em; }
+.content-box .prose p:last-child { margin-bottom: 0; }
 
 /* 人物关系网 */
 .char {

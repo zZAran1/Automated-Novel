@@ -36,6 +36,15 @@ async def _auth(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def _no_cache_static(request: Request, call_next):
+    """页面与静态资源不走强缓存（仍可用 ETag 协商），前端改版后刷新页面即生效。"""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 def _strip_str(v: Any) -> Any:
     """入参字符串去掉首尾空白（含全角空格），纯空白变空串后由 min_length=1 拒绝。"""
     return v.strip() if isinstance(v, str) else v

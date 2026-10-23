@@ -237,6 +237,43 @@ async function generateChapter(no, btn) {
 // 与后端 count_chars 同口径：不计空白字符
 const countChars = (text) => text.replace(/\s/g, "").length;
 
+// 当前内容区展示的正文原文，供「复制」按钮取用
+let displayText = "";
+
+// 正文按换行切段渲染为 <p>，段首缩进两字；段内不做二次换行处理
+function renderProse(prose, text) {
+  prose.innerHTML = text
+    .split(/\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((p) => `<p>${p.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>`)
+    .join("");
+}
+
+// 一键复制正文；剪贴板 API 不可用时退回隐藏 textarea 方案
+async function copyText(text) {
+  if (!text) return toast("暂无可复制的正文", "error");
+  try {
+    await navigator.clipboard.writeText(text);
+    return toast("已复制正文");
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch (e2) {
+      ok = false;
+    }
+    ta.remove();
+    toast(ok ? "已复制正文" : "复制失败，请手动选择文本复制", ok ? "info" : "error");
+  }
+}
+
 let abortCtrl = null; // 当前生成请求的中断控制器
 
 // 中断输出：主动断开 SSE 连接，后端检测到断开后立即停止大模型生成
@@ -288,18 +325,20 @@ async function* sseEvents(res) {
   }
 }
 
-// 把内容区切换为流式输出模式，返回正文区与实时字数徽章；标题栏带「停止」按钮可随时中断输出
+// 把内容区切换为流式输出模式，返回正文区与实时字数徽章；标题栏带「复制」「停止」按钮
 function renderStreaming(no, title, badgePrefix = "") {
   const box = $("#content-box");
   box.className = "content-box";
   box.innerHTML = `
-    <h3>第${no}章 ${title}<span class="badge" id="live-badge">生成中…</span><button class="ghost small" id="btn-stop" style="margin-left:8px">■ 停止</button></h3>
+    <h3>第${no}章 ${title}<span class="badge" id="live-badge">生成中…</span><button class="ghost small" id="btn-copy" style="margin-left:8px">复制</button><button class="ghost small" id="btn-stop" style="margin-left:8px">■ 停止</button></h3>
     <div class="prose"></div>`;
   $("#btn-stop").addEventListener("click", stopGeneration);
+  $("#btn-copy").addEventListener("click", () => copyText(displayText));
   const prose = box.querySelector(".prose");
   const badge = $("#live-badge");
   const show = (text) => {
-    prose.textContent = text;
+    displayText = text;
+    renderProse(prose, text);
     badge.textContent = `${badgePrefix}${countChars(text)} 字（生成中）`;
   };
   return { prose, badge, show };
@@ -414,15 +453,18 @@ async function viewChapter(no) {
 function renderContent(ch) {
   const box = $("#content-box");
   if (!ch) {
+    displayText = "";
     box.className = "content-box muted";
     box.textContent = "点击章节右侧的「生成」或「查看」，正文会显示在这里。";
     return;
   }
+  displayText = ch.content;
   box.className = "content-box";
   box.innerHTML = `
-    <h3>第${ch.chapter_no}章 ${ch.title}<span class="badge">${ch.char_count} 字</span></h3>
+    <h3>第${ch.chapter_no}章 ${ch.title}<span class="badge">${ch.char_count} 字</span><button class="ghost small" id="btn-copy" style="margin-left:8px">复制</button></h3>
     <div class="prose"></div>`;
-  box.querySelector(".prose").textContent = ch.content;
+  $("#btn-copy").addEventListener("click", () => copyText(displayText));
+  renderProse(box.querySelector(".prose"), ch.content);
 }
 
 async function refreshStats() {
