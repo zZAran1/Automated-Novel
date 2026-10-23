@@ -12,14 +12,14 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAIError
 from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 from characters import MIN_CHARACTERS, build_network, supplement_network
 from config import CHAPTER_TARGET_CHARS, SUMMARY_MAX_CHARS
-from generator import count_chars, generate_chapter
+from generator import count_chars, generate_chapter, generate_chapter_stream
 from llm import LLMOutputError
 from memory import delete_novel
 
@@ -286,6 +286,22 @@ def _load_chapter(outline_id: int, chapter_no: int) -> tuple[OutlineIn, ChapterO
     return outline, outline.chapters[chapter_no - 1]
 
 
+def _store_chapter(outline_id: int, chapter_no: int, title: str, content: str) -> ChapterOut:
+    """记录本章正文与字数，并把基于旧前文的后续章节标记为内容过时。"""
+    out = ChapterOut(
+        outline_id=outline_id,
+        chapter_no=chapter_no,
+        title=title,
+        content=content,
+        char_count=count_chars(content),
+        # 已生成的后续章节是按旧前文写的，本次生成后内容过时
+        stale_chapters=sorted(no for (oid, no) in _chapters if oid == outline_id and no > chapter_no),
+    )
+    _chapters[(outline_id, chapter_no)] = out
+    _save()
+    return out
+
+
 @app.post(
     "/outline/{outline_id}/chapters/{chapter_no}/generate",
     response_model=ChapterOut,
@@ -309,18 +325,56 @@ def generate_chapter_api(outline_id: int, chapter_no: int) -> ChapterOut:
         raise HTTPException(status_code=422, detail=str(e))
     except OpenAIError as e:  # 超时/限流等服务异常转 502，不暴露 500
         raise HTTPException(status_code=502, detail=f"DeepSeek 服务调用失败: {e}")
-    out = ChapterOut(
-        outline_id=outline_id,
-        chapter_no=chapter_no,
-        title=chapter.title,
-        content=content,
-        char_count=count_chars(content),
-        # 已生成的后续章节是按旧前文写的，本次生成后内容过时
-        stale_chapters=sorted(no for (oid, no) in _chapters if oid == outline_id and no > chapter_no),
+    return _store_chapter(outline_id, chapter_no, chapter.title, content)
+
+
+def _sse(data: dict) -> str:
+    """把事件序列化为 SSE 帧（data: {...}\\n\\n）。"""
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post(
+    "/outline/{outline_id}/chapters/{chapter_no}/generate/stream",
+    summary="流式生成一章正文（SSE）",
+    description=(
+        "以 text/event-stream 逐段推送正文，事件类型："
+        "delta（追加文本）/ reset（正文重写，清空后再收增量）/"
+        " done（生成完成，携带章节数据）/ error（生成失败，携带原因）"
+    ),
+)
+def generate_chapter_stream_api(outline_id: int, chapter_no: int) -> StreamingResponse:
+    outline, chapter = _load_chapter(outline_id, chapter_no)
+    # 校验与关系网构建失败在这里直接抛 HTTPException，不进入流
+    network = _get_network(outline_id, outline)
+
+    def events():
+        try:
+            for kind, payload in generate_chapter_stream(
+                novel_id=_novel_keys[outline_id],
+                chapter_no=chapter_no,
+                title=chapter.title,
+                summary=chapter.summary,
+                synopsis=outline.synopsis,
+                genre=outline.genre,
+                network=network,
+            ):
+                if kind == "delta":
+                    yield _sse({"type": "delta", "text": payload})
+                elif kind == "reset":
+                    yield _sse({"type": "reset", "reason": payload})
+                else:  # done
+                    out = _store_chapter(outline_id, chapter_no, chapter.title, payload)
+                    yield _sse({"type": "done", "chapter": out.model_dump()})
+        except ValueError as e:  # 超字数等生成校验失败
+            yield _sse({"type": "error", "detail": str(e)})
+        except OpenAIError as e:  # 超时/限流等服务异常，不暴露 500
+            yield _sse({"type": "error", "detail": f"DeepSeek 服务调用失败: {e}"})
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-    _chapters[(outline_id, chapter_no)] = out
-    _save()
-    return out
 
 
 @app.get(

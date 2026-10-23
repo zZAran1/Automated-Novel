@@ -205,9 +205,9 @@ function updateBadges() {
 async function generateChapter(no, btn) {
   btn.disabled = true;
   btn.textContent = "生成中…";
-  toast(`第${no}章生成中，请稍候（约 1 分钟）`);
+  toast(`第${no}章生成中，正文将实时输出`);
   try {
-    const ch = await api("POST", `/outline/${current.id}/chapters/${no}/generate`);
+    const ch = await streamChapter(no);
     current.chapters[no] = ch;
     updateBadges();
     renderContent(ch);
@@ -223,6 +223,60 @@ async function generateChapter(no, btn) {
     btn.disabled = false;
     btn.textContent = "生成";
   }
+}
+
+// 流式生成：消费 SSE 事件（delta 追加 / reset 重写清空 / done 完成 / error 失败），正文实时显示
+async function streamChapter(no) {
+  const headers = {};
+  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+  const res = await fetch(`/outline/${current.id}/chapters/${no}/generate/stream`, {
+    method: "POST",
+    headers,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(typeof data.detail === "string" ? data.detail : res.statusText);
+  }
+  const title = current.outline.chapters[no - 1].title;
+  const box = $("#content-box");
+  box.className = "content-box";
+  box.innerHTML = `
+    <h3>第${no}章 ${title}<span class="badge" id="live-badge">生成中…</span></h3>
+    <div class="prose"></div>`;
+  const prose = box.querySelector(".prose");
+  const badge = $("#live-badge");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let text = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const line = frame.split("\n").find((l) => l.startsWith("data: "));
+      if (!line) continue;
+      const ev = JSON.parse(line.slice(6));
+      if (ev.type === "delta") {
+        text += ev.text;
+        prose.textContent = text;
+        // 与后端 count_chars 同口径：不计空白字符
+        badge.textContent = `${text.replace(/\s/g, "").length} 字（生成中）`;
+      } else if (ev.type === "reset") {
+        text = "";
+        prose.textContent = "";
+        toast(ev.reason === "扩写" ? "正文偏短，自动扩写中…" : "正文超长，自动压缩中…");
+      } else if (ev.type === "done") {
+        return ev.chapter;
+      } else if (ev.type === "error") {
+        throw new Error(ev.detail);
+      }
+    }
+  }
+  throw new Error("连接中断，未收到生成结果");
 }
 
 async function viewChapter(no) {

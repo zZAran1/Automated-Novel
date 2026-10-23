@@ -64,6 +64,32 @@ def chat(
     return response.choices[0].message.content or ""
 
 
+def chat_stream(
+    prompt: str,
+    system: str = "你是一个专业的小说创作助手。",
+    model: str = TEXT_MODEL,
+    temperature: float = 0.8,
+    max_tokens: int = 2000,
+):
+    """单轮对话流式版：逐段 yield 模型输出的文本增量。"""
+    response = get_client().chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=temperature,
+        max_tokens=max_tokens,
+        stream=True,
+    )
+    for chunk in response:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+
+
 def chat_json(
     prompt: str,
     required_keys: tuple[str, ...] = (),
@@ -110,6 +136,13 @@ def write_text(prompt: str, **kwargs) -> str:
     kwargs.setdefault("system", "你是一个专业的网文作者，文笔生动，擅长场景描写与对话。")
     kwargs.setdefault("temperature", 0.9)
     return chat(prompt, model=TEXT_MODEL, **kwargs)
+
+
+def write_text_stream(prompt: str, **kwargs):
+    """正文写作任务流式版：与 write_text 同参数，逐段 yield 文本增量。"""
+    kwargs.setdefault("system", "你是一个专业的网文作者，文笔生动，擅长场景描写与对话。")
+    kwargs.setdefault("temperature", 0.9)
+    yield from chat_stream(prompt, model=TEXT_MODEL, **kwargs)
 
 
 if __name__ == "__main__":
