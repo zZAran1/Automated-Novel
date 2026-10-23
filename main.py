@@ -377,6 +377,98 @@ def generate_chapter_stream_api(outline_id: int, chapter_no: int) -> StreamingRe
     )
 
 
+def _written_chars(outline_id: int) -> int:
+    """该小说已生成正文的累计字数。"""
+    return sum(ch.char_count for (oid, _), ch in _chapters.items() if oid == outline_id)
+
+
+@app.post(
+    "/outline/{outline_id}/chapters/generate/auto",
+    summary="一键连续自动生成正文（SSE）",
+    description=(
+        "按章节顺序自动补入缺失章节的正文，已生成的章节跳过不重写；"
+        "每章事件同单章流式接口（delta/reset 携带 chapter_no），"
+        "另含 chapter_start（开始新一章）/ chapter_done（一章完成）/ done（本次运行结束，携带原因）。"
+        "累计字数达到全书目标后不再开启新章节。"
+    ),
+)
+def generate_auto_api(outline_id: int) -> StreamingResponse:
+    if outline_id not in _store:
+        raise HTTPException(status_code=404, detail=f"大纲 {outline_id} 不存在")
+    outline = _store[outline_id]
+    targets = [
+        no for no in range(1, len(outline.chapters) + 1) if (outline_id, no) not in _chapters
+    ]
+    if not targets:
+        raise HTTPException(status_code=400, detail="没有需要生成的章节，所有章节均已生成")
+    # 连续生成全程共用同一份人物关系网，每章生成前都会完整遍历它
+    network = _get_network(outline_id, outline)
+    total_chars = outline.total_chars or LENGTH_PRESETS[outline.length]
+
+    def events():
+        generated: list[int] = []
+        current_no = targets[0]
+        try:
+            for no in targets:
+                current_no = no
+                written = _written_chars(outline_id)
+                if written >= total_chars:
+                    # 已达全书目标字数，不再开启新章节
+                    yield _sse({
+                        "type": "done",
+                        "generated": generated,
+                        "written_chars": written,
+                        "total_chars": total_chars,
+                        "reason": f"累计字数已达全书目标 {total_chars} 字，剩余章节未生成",
+                    })
+                    return
+                chapter = outline.chapters[no - 1]
+                yield _sse({
+                    "type": "chapter_start",
+                    "chapter_no": no,
+                    "title": chapter.title,
+                    "total_chapters": len(outline.chapters),
+                })
+                for kind, payload in generate_chapter_stream(
+                    novel_id=_novel_keys[outline_id],
+                    chapter_no=no,
+                    title=chapter.title,
+                    summary=chapter.summary,
+                    synopsis=outline.synopsis,
+                    genre=outline.genre,
+                    network=network,
+                ):
+                    if kind == "delta":
+                        yield _sse({"type": "delta", "chapter_no": no, "text": payload})
+                    elif kind == "reset":
+                        yield _sse({"type": "reset", "chapter_no": no, "reason": payload})
+                    else:  # done
+                        out = _store_chapter(outline_id, no, chapter.title, payload)
+                        generated.append(no)
+                        yield _sse({"type": "chapter_done", "chapter": out.model_dump()})
+            yield _sse({
+                "type": "done",
+                "generated": generated,
+                "written_chars": _written_chars(outline_id),
+                "total_chars": total_chars,
+                "reason": "全部缺失章节生成完成",
+            })
+        except ValueError as e:  # 某章校验失败即停止本次连续生成，已完成章节保留
+            yield _sse({"type": "error", "chapter_no": current_no, "detail": str(e)})
+        except OpenAIError as e:
+            yield _sse({
+                "type": "error",
+                "chapter_no": current_no,
+                "detail": f"DeepSeek 服务调用失败: {e}",
+            })
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get(
     "/outline/{outline_id}/chapters/{chapter_no}",
     response_model=ChapterOut,

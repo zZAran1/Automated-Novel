@@ -7,6 +7,8 @@ AI 自动写小说应用：输入小说大纲，按章生成正文。自动构�
 - **大纲驱动**：提交书名、题材、故事梗概与章节大纲即可开始创作
 - **逐章生成正文**：单章目标 1500~2000 字，超限自动压缩、过短自动扩写，仍不合格自动作废
 - **流式输出**：生成正文时以 SSE 逐段推送，前端实时显示写作过程，压缩/扩写重写也会实时提示
+- **连续自动补入**：一键按章节顺序自动补入缺失章节正文（已生成章节跳过不重写），累计字数达到全书目标后自动停止
+- **中断输出**：生成过程中可随时点「■ 停止」中断输出，主动断开连接并停止大模型继续生成；未完成的正文不保存，已完成章节保留
 - **人物关系网**：前端可直接提交人物与关系；留空则从大纲提取，提取不到自动原创一套；人物少于 3 人自动补充
 - **全书一致性**：人物关系从开头到结尾保持一致；允许只登场一两章的边缘人物，但不得与已有设定矛盾
 - **向量记忆**：已写章节切块存入 ChromaDB，生成新章节时自动召回相关前文情节
@@ -81,6 +83,7 @@ docker compose down           # 停止
 | DELETE | `/outline/{id}` | 删除小说（正文、关系网、向量记忆一并删除） |
 | POST | `/outline/{id}/chapters/{no}/generate` | 生成一章正文 |
 | POST | `/outline/{id}/chapters/{no}/generate/stream` | 流式生成一章正文（SSE：delta/reset/done/error 事件） |
+| POST | `/outline/{id}/chapters/generate/auto` | 一键连续自动补入缺失章节正文（SSE，跳过已生成章节，达目标字数即停） |
 | GET | `/outline/{id}/chapters/{no}` | 查询已生成的章节正文 |
 | GET | `/outline/{id}/stats` | 全书字数统计（逐章字数） |
 | GET | `/outline/{id}/network` | 查看人物关系网（未构建则自动构建） |
@@ -105,6 +108,7 @@ Automated-Novel/
 ├── static/            # 前端页面
 ├── data/              # 业务数据（novels.json，不入库）
 ├── db/                # 向量库数据（不入库）
+├── .chroma-cache/     # 嵌入模型缓存（Docker 挂载持久化，不入库、无需备份）
 ├── Dockerfile         # Docker 镜像构建
 ├── docker-compose.yml # Docker 部署编排
 ├── .env.example       # 配置模板（真实 Key 填入 .env，勿提交）

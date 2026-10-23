@@ -2,5 +2,6 @@
 .env
 db/
 data/
+.chroma-cache/
 __pycache__/
 *.pyc

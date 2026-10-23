@@ -9,4 +9,6 @@ services:
       # 业务数据与向量库挂载到宿主机，容器重建不丢数据
       - ./db:/app/db
       - ./data:/app/data
+      # ChromaDB 嵌入模型缓存持久化：避免容器重建后重新下载约 80MB 模型
+      - ./.chroma-cache:/root/.cache/chroma
     restart: unless-stopped

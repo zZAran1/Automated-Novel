@@ -7,3 +7,4 @@ __pycache__/
 # 运行数据不进镜像，通过数据卷挂载
 db/
 data/
+.chroma-cache/

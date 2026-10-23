@@ -82,12 +82,16 @@ def chat_stream(
         max_tokens=max_tokens,
         stream=True,
     )
-    for chunk in response:
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield delta
+    try:
+        for chunk in response:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+    finally:
+        # 流被中断/断开时主动关闭上游连接，避免大模型继续生成空耗额度
+        response.close()
 
 
 def chat_json(

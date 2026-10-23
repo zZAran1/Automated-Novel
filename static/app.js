@@ -218,37 +218,62 @@ async function generateChapter(no, btn) {
       toast(`注意：第 ${ch.stale_chapters.join("、")} 章基于旧前文生成，内容已过时，建议重新生成`, "error");
     }
   } catch (e) {
-    toast(e.message, "error");
+    if (e.name === "AbortError") {
+      markStopped();
+      toast("已中断输出并断开连接，本章正文未保存");
+    } else {
+      toast(e.message, "error");
+    }
   } finally {
+    abortCtrl = null;
+    disableStop();
     btn.disabled = false;
     btn.textContent = "生成";
   }
 }
 
-// 流式生成：消费 SSE 事件（delta 追加 / reset 重写清空 / done 完成 / error 失败），正文实时显示
-async function streamChapter(no) {
+// ---- SSE 流式公共逻辑 ----
+
+// 与后端 count_chars 同口径：不计空白字符
+const countChars = (text) => text.replace(/\s/g, "").length;
+
+let abortCtrl = null; // 当前生成请求的中断控制器
+
+// 中断输出：主动断开 SSE 连接，后端检测到断开后立即停止大模型生成
+function stopGeneration() {
+  if (abortCtrl) abortCtrl.abort();
+}
+
+function markStopped() {
+  const badge = $("#live-badge");
+  if (badge) badge.textContent = "已停止（未保存）";
+}
+
+function disableStop() {
+  const stop = $("#btn-stop");
+  if (stop) stop.disabled = true;
+}
+
+async function openSse(path) {
   const headers = {};
   if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
-  const res = await fetch(`/outline/${current.id}/chapters/${no}/generate/stream`, {
+  abortCtrl = new AbortController();
+  const res = await fetch(path, {
     method: "POST",
     headers,
+    signal: abortCtrl.signal,
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(typeof data.detail === "string" ? data.detail : res.statusText);
   }
-  const title = current.outline.chapters[no - 1].title;
-  const box = $("#content-box");
-  box.className = "content-box";
-  box.innerHTML = `
-    <h3>第${no}章 ${title}<span class="badge" id="live-badge">生成中…</span></h3>
-    <div class="prose"></div>`;
-  const prose = box.querySelector(".prose");
-  const badge = $("#live-badge");
+  return sseEvents(res);
+}
+
+async function* sseEvents(res) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
-  let text = "";
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -258,25 +283,120 @@ async function streamChapter(no) {
       const frame = buf.slice(0, idx);
       buf = buf.slice(idx + 2);
       const line = frame.split("\n").find((l) => l.startsWith("data: "));
-      if (!line) continue;
-      const ev = JSON.parse(line.slice(6));
-      if (ev.type === "delta") {
-        text += ev.text;
-        prose.textContent = text;
-        // 与后端 count_chars 同口径：不计空白字符
-        badge.textContent = `${text.replace(/\s/g, "").length} 字（生成中）`;
-      } else if (ev.type === "reset") {
-        text = "";
-        prose.textContent = "";
-        toast(ev.reason === "扩写" ? "正文偏短，自动扩写中…" : "正文超长，自动压缩中…");
-      } else if (ev.type === "done") {
-        return ev.chapter;
-      } else if (ev.type === "error") {
-        throw new Error(ev.detail);
-      }
+      if (line) yield JSON.parse(line.slice(6));
+    }
+  }
+}
+
+// 把内容区切换为流式输出模式，返回正文区与实时字数徽章；标题栏带「停止」按钮可随时中断输出
+function renderStreaming(no, title, badgePrefix = "") {
+  const box = $("#content-box");
+  box.className = "content-box";
+  box.innerHTML = `
+    <h3>第${no}章 ${title}<span class="badge" id="live-badge">生成中…</span><button class="ghost small" id="btn-stop" style="margin-left:8px">■ 停止</button></h3>
+    <div class="prose"></div>`;
+  $("#btn-stop").addEventListener("click", stopGeneration);
+  const prose = box.querySelector(".prose");
+  const badge = $("#live-badge");
+  const show = (text) => {
+    prose.textContent = text;
+    badge.textContent = `${badgePrefix}${countChars(text)} 字（生成中）`;
+  };
+  return { prose, badge, show };
+}
+
+async function streamChapter(no) {
+  const events = await openSse(`/outline/${current.id}/chapters/${no}/generate/stream`);
+  const { show } = renderStreaming(no, current.outline.chapters[no - 1].title);
+  let text = "";
+  for await (const ev of events) {
+    if (ev.type === "delta") {
+      text += ev.text;
+      show(text);
+    } else if (ev.type === "reset") {
+      text = "";
+      show("");
+      toast(ev.reason === "扩写" ? "正文偏短，自动扩写中…" : "正文超长，自动压缩中…");
+    } else if (ev.type === "done") {
+      return ev.chapter;
+    } else if (ev.type === "error") {
+      throw new Error(ev.detail);
     }
   }
   throw new Error("连接中断，未收到生成结果");
+}
+
+// 一键连续生成：按章节顺序补入缺失章节，返回 { generated, written_chars, total_chars, reason, lastChapter }
+async function streamAuto() {
+  const events = await openSse(`/outline/${current.id}/chapters/generate/auto`);
+  const result = { generated: [], lastChapter: null };
+  let show = null;
+  let text = "";
+  try {
+    for await (const ev of events) {
+      if (ev.type === "chapter_start") {
+        text = "";
+        show = renderStreaming(ev.chapter_no, ev.title, `${ev.chapter_no}/${ev.total_chapters} · `).show;
+        show("");
+        toast(`开始生成第${ev.chapter_no}章 ${ev.title}`);
+      } else if (ev.type === "delta") {
+        text += ev.text;
+        show(text);
+      } else if (ev.type === "reset") {
+        text = "";
+        show("");
+        toast(ev.reason === "扩写" ? "正文偏短，自动扩写中…" : "正文超长，自动压缩中…");
+      } else if (ev.type === "chapter_done") {
+        current.chapters[ev.chapter.chapter_no] = ev.chapter;
+        result.generated.push(ev.chapter.chapter_no);
+        result.lastChapter = ev.chapter;
+        updateBadges();
+        toast(`第${ev.chapter.chapter_no}章完成，${ev.chapter.char_count} 字`);
+      } else if (ev.type === "done") {
+        Object.assign(result, ev);
+        return result;
+      } else if (ev.type === "error") {
+        throw new Error(`第${ev.chapter_no}章生成失败：${ev.detail}`);
+      }
+    }
+    throw new Error("连接中断，连续生成未完成");
+  } catch (e) {
+    if (e.name === "AbortError") {
+      // 用户主动停止：已完成章节已入库，把补入情况带给调用方
+      const stop = new Error("已中断连续生成");
+      stop.stopped = true;
+      stop.generated = result.generated;
+      throw stop;
+    }
+    throw e;
+  }
+}
+
+async function autoGenerate(btn) {
+  btn.disabled = true;
+  btn.textContent = "生成中…";
+  try {
+    const r = await streamAuto();
+    if (r.lastChapter) renderContent(r.lastChapter);
+    await refreshStats();
+    loadNetwork();
+    toast(`${r.reason}，本次补入 ${r.generated.length} 章`);
+  } catch (e) {
+    if (e.stopped) {
+      markStopped();
+      toast(`已中断输出并断开连接，本次已补入 ${e.generated.length} 章`);
+    } else {
+      toast(e.message, "error");
+    }
+  } finally {
+    // 停止/失败时已完成章节已入库，同步一下状态
+    abortCtrl = null;
+    disableStop();
+    updateBadges();
+    refreshStats();
+    btn.disabled = false;
+    btn.textContent = "⚡ 一键连续生成";
+  }
 }
 
 async function viewChapter(no) {
@@ -360,6 +480,7 @@ $("#btn-add-character").addEventListener("click", () =>
 $("#btn-add-relation").addEventListener("click", () =>
   addRow("#relation-rows", [["人物A 姓名", 20], ["人物B 姓名", 20], ["关系描述", 200]], "relation"));
 $("#btn-submit").addEventListener("click", submitOutline);
+$("#btn-auto").addEventListener("click", (e) => autoGenerate(e.target));
 $("#btn-new").addEventListener("click", () => {
   $("#work-view").classList.add("hidden");
   $("#form-view").classList.remove("hidden");
