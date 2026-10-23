@@ -30,7 +30,8 @@ def get_client() -> OpenAI:
         api_key = os.getenv("DEEPSEEK_API_KEY")
         if not api_key or api_key.startswith("sk-在这里"):
             raise RuntimeError("请先在 .env 文件中填入 DEEPSEEK_API_KEY")
-        _client = OpenAI(api_key=api_key, base_url=BASE_URL)
+        # 显式配置超时与重试：偶发超时/限流自动重试，仍失败由调用方转 502
+        _client = OpenAI(api_key=api_key, base_url=BASE_URL, timeout=300.0, max_retries=2)
     return _client
 
 

@@ -1,0 +1,12 @@
+services:
+  novel:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # 业务数据与向量库挂载到宿主机，容器重建不丢数据
+      - ./db:/app/db
+      - ./data:/app/data
+    restart: unless-stopped

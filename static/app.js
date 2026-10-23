@@ -1,13 +1,18 @@
 const $ = (sel) => document.querySelector(sel);
 
+// 服务端设置了 APP_TOKEN 时，通过 ?token=xxx 访问并随请求携带
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+
 let current = null; // { id, outline, stats, network, chapters: {no: ChapterOut} }
 
 /* ---------- 基础工具 ---------- */
 
 async function api(method, path, body) {
+  const headers = { "Content-Type": "application/json" };
+  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
   const res = await fetch(path, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
@@ -54,6 +59,25 @@ function readRows(containerId, keys, requiredIdx = []) {
     out.push(Object.fromEntries(keys.map((k, i) => [k, values[i]])));
   }
   return out;
+}
+
+/* ---------- 小说列表 ---------- */
+
+async function loadNovelList() {
+  const sel = $("#open-select");
+  try {
+    const list = await api("GET", "/outlines");
+    sel.innerHTML = list.length
+      ? list
+          .map(
+            (o) =>
+              `<option value="${o.id}">#${o.id} ${o.title}（${o.chapter_count} 章 / 已写 ${o.written_chars} 字）</option>`
+          )
+          .join("")
+      : '<option value="">暂无已保存的小说</option>';
+  } catch (e) {
+    sel.innerHTML = '<option value="">小说列表加载失败</option>';
+  }
 }
 
 /* ---------- 新建小说 ---------- */
@@ -121,6 +145,7 @@ async function submitOutline() {
     const out = await api("POST", "/outline", payload);
     toast(`创建成功，小说 ID：${out.id}`);
     await enterWorkspace(out.id);
+    loadNovelList();
   } catch (e) {
     toast(e.message, "error");
   } finally {
@@ -287,12 +312,26 @@ $("#btn-new").addEventListener("click", () => {
   window.scrollTo({ top: 0, behavior: "smooth" });
 });
 $("#btn-open").addEventListener("click", () => {
-  const id = Number($("#open-id").value);
-  if (!Number.isSafeInteger(id) || id <= 0) {
-    return toast("请输入正确的小说 ID（正整数）", "error");
-  }
+  const id = Number($("#open-select").value);
+  if (!id) return toast("请先选择要打开的小说", "error");
   enterWorkspace(id);
 });
+$("#btn-delete").addEventListener("click", async () => {
+  if (!current) return;
+  const title = current.outline.title;
+  if (!confirm(`确定删除《${title}》？章节正文与人物关系网将一并删除，不可恢复`)) return;
+  try {
+    await api("DELETE", `/outline/${current.id}`);
+    toast(`已删除《${title}》`);
+    current = null;
+    $("#work-view").classList.add("hidden");
+    $("#form-view").classList.remove("hidden");
+    loadNovelList();
+  } catch (e) {
+    toast(e.message, "error");
+  }
+});
 
-// 默认给一行章节输入
+// 默认给一行章节输入，并加载已有小说列表
 addRow("#chapter-rows", [["章节标题", 100], ["情节概要", 2500]], "chapter");
+loadNovelList();

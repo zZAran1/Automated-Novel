@@ -10,7 +10,7 @@
 <header class="topbar">
   <div class="brand"><span class="logo">✒️</span> 自动小说工坊</div>
   <div class="top-actions">
-    <input id="open-id" type="number" min="1" placeholder="小说 ID">
+    <select id="open-select"><option value="">暂无已保存的小说</option></select>
     <button id="btn-open" class="ghost">打开</button>
     <button id="btn-new" class="primary">＋ 新建小说</button>
   </div>
@@ -77,7 +77,10 @@
       <div class="card">
         <div class="work-head">
           <h2 id="work-title"></h2>
-          <div id="work-meta" class="muted"></div>
+          <div class="work-sub">
+            <div id="work-meta" class="muted"></div>
+            <button id="btn-delete" class="ghost small">删除小说</button>
+          </div>
         </div>
         <div class="progress-wrap">
           <div class="progress"><div id="progress-bar"></div></div>

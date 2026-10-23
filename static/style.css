@@ -47,6 +47,16 @@ body {
   border: 1px solid var(--border);
   border-radius: 8px;
 }
+.top-actions select {
+  width: 300px;
+  max-width: 46vw;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  color: var(--text);
+  background: #fff;
+}
 
 .container { max-width: 1180px; margin: 24px auto; padding: 0 20px; }
 
@@ -141,6 +151,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 /* 工作台 */
 .work-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; align-items: start; }
 .work-head h2 { margin-bottom: 4px; }
+.work-sub { display: flex; align-items: center; gap: 12px; }
 .progress-wrap { margin: 16px 0 4px; }
 .progress {
   height: 10px;

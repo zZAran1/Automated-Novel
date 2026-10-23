@@ -1,8 +1,11 @@
 """章节向量记忆：保存已写章节，供后续章节生成时召回相关情节。"""
 
+from pathlib import Path
+
 import chromadb
 
-DB_PATH = "db"
+# 用绝对路径：换工作目录启动也不会把向量库建到别处
+DB_PATH = str(Path(__file__).resolve().parent / "db")
 COLLECTION = "chapters"
 CHUNK_SIZE = 500  # 每个文本块最大字符数
 
@@ -77,3 +80,8 @@ def recall(query: str, novel_id: str, before_chapter: int, k: int = 4) -> list[s
         },
     )
     return res["documents"][0]
+
+
+def delete_novel(novel_id: str) -> None:
+    """删除该小说的全部向量块（删除小说时调用）。"""
+    _collection().delete(where={"novel_id": {"$eq": novel_id}})

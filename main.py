@@ -4,22 +4,36 @@
 接口文档: http://127.0.0.1:8000/docs
 """
 
+import json
+import os
+import threading
 import uuid
-from itertools import count
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from openai import OpenAIError
 from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 from characters import MIN_CHARACTERS, build_network, supplement_network
 from config import CHAPTER_TARGET_CHARS, SUMMARY_MAX_CHARS
 from generator import count_chars, generate_chapter
 from llm import LLMOutputError
+from memory import delete_novel
 
 app = FastAPI(title="Automated Novel API")
+
+
+@app.middleware("http")
+async def _auth(request: Request, call_next):
+    """可选鉴权：.env 设置 APP_TOKEN 后，业务接口需携带 Authorization: Bearer <token>。"""
+    token = os.getenv("APP_TOKEN")
+    if token and request.url.path.startswith("/outline"):
+        if request.headers.get("Authorization") != f"Bearer {token}":
+            return JSONResponse({"detail": "未授权，请在链接后携带 ?token=你的APP_TOKEN"}, status_code=401)
+    return await call_next(request)
 
 
 def _strip_str(v: Any) -> Any:
@@ -148,15 +162,68 @@ class StatsOut(BaseModel):
     chapters: list[ChapterStat] = Field(default_factory=list, description="每章字数记录")
 
 
+class OutlineSummary(BaseModel):
+    """小说列表条目。"""
+
+    id: int
+    title: str
+    genre: str
+    chapter_count: int
+    written_chars: int
+
+
 _store: dict[int, OutlineIn] = {}
-_ids = count(1)
 _chapters: dict[tuple[int, int], ChapterOut] = {}
 _networks: dict[int, dict] = {}
-# 向量库的唯一键：大纲 id 重启后会从 1 重计，直接当 novel_id 会召回旧小说的片段，
-# 因此每本小说额外生成一个跨重启不重复的 UUID 作为向量库键
+# 每本小说使用独立 UUID 作为向量库唯一标识，避免 novel_id 复用导致跨小说内容召回串书
 _novel_keys: dict[int, str] = {}
 
 STATIC_DIR = Path(__file__).parent / "static"
+# 业务数据落盘文件：大纲、章节正文、人物关系网重启后从这里恢复
+DATA_FILE = Path(__file__).parent / "data" / "novels.json"
+_save_lock = threading.Lock()
+
+
+def _save() -> None:
+    """把全部业务数据原子写入 JSON（先写临时文件再替换，避免写一半损坏）。"""
+    payload = {
+        "novels": {
+            str(oid): {
+                "outline": outline.model_dump(),
+                "novel_key": _novel_keys[oid],
+                "network": _networks.get(oid),
+                "chapters": {
+                    str(no): ch.model_dump()
+                    for (o, no), ch in _chapters.items()
+                    if o == oid
+                },
+            }
+            for oid, outline in _store.items()
+        }
+    }
+    with _save_lock:
+        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = DATA_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, DATA_FILE)
+
+
+def _load() -> None:
+    """启动时从 JSON 恢复业务数据，文件不存在则从空库开始。"""
+    if not DATA_FILE.exists():
+        return
+    raw = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    for oid_str, rec in raw["novels"].items():
+        oid = int(oid_str)
+        _store[oid] = OutlineIn.model_validate(rec["outline"])
+        _novel_keys[oid] = rec["novel_key"]
+        if rec["network"] is not None:
+            _networks[oid] = rec["network"]
+        for no_str, ch in rec["chapters"].items():
+            _chapters[(oid, int(no_str))] = ChapterOut.model_validate(ch)
+
+
+_load()
 
 
 def _get_network(outline_id: int, outline: OutlineIn) -> dict:
@@ -183,15 +250,19 @@ def _get_network(outline_id: int, outline: OutlineIn) -> dict:
             )
     except LLMOutputError as e:  # 关系网构建/补充失败，作废
         raise HTTPException(status_code=502, detail=f"人物关系网构建失败: {e}")
+    except OpenAIError as e:  # 超时/限流等服务异常转 502，不暴露 500
+        raise HTTPException(status_code=502, detail=f"DeepSeek 服务调用失败: {e}")
     _networks[outline_id] = network
+    _save()
     return network
 
 
 @app.post("/outline", response_model=OutlineOut, summary="接收小说大纲")
 def create_outline(outline: OutlineIn) -> OutlineOut:
-    outline_id = next(_ids)
+    outline_id = max(_store, default=0) + 1  # id 随数据持久化，重启后接着排不复用
     _store[outline_id] = outline
     _novel_keys[outline_id] = uuid.uuid4().hex
+    _save()
     return OutlineOut(id=outline_id, outline=outline)
 
 
@@ -236,6 +307,8 @@ def generate_chapter_api(outline_id: int, chapter_no: int) -> ChapterOut:
         )
     except ValueError as e:  # 超字数等生成校验失败
         raise HTTPException(status_code=422, detail=str(e))
+    except OpenAIError as e:  # 超时/限流等服务异常转 502，不暴露 500
+        raise HTTPException(status_code=502, detail=f"DeepSeek 服务调用失败: {e}")
     out = ChapterOut(
         outline_id=outline_id,
         chapter_no=chapter_no,
@@ -246,6 +319,7 @@ def generate_chapter_api(outline_id: int, chapter_no: int) -> ChapterOut:
         stale_chapters=sorted(no for (oid, no) in _chapters if oid == outline_id and no > chapter_no),
     )
     _chapters[(outline_id, chapter_no)] = out
+    _save()
     return out
 
 
@@ -291,6 +365,34 @@ def get_network(outline_id: int) -> dict:
     if outline_id not in _store:
         raise HTTPException(status_code=404, detail=f"大纲 {outline_id} 不存在")
     return _get_network(outline_id, _store[outline_id])
+
+
+@app.get("/outlines", response_model=list[OutlineSummary], summary="小说列表")
+def list_outlines() -> list[OutlineSummary]:
+    return [
+        OutlineSummary(
+            id=oid,
+            title=o.title,
+            genre=o.genre,
+            chapter_count=len(o.chapters),
+            written_chars=sum(ch.char_count for (i, _), ch in _chapters.items() if i == oid),
+        )
+        for oid, o in sorted(_store.items())
+    ]
+
+
+@app.delete("/outline/{outline_id}", summary="删除小说（正文、人物关系网与向量记忆一并删除）")
+def delete_outline(outline_id: int) -> dict:
+    if outline_id not in _store:
+        raise HTTPException(status_code=404, detail=f"大纲 {outline_id} 不存在")
+    del _store[outline_id]
+    _networks.pop(outline_id, None)
+    novel_key = _novel_keys.pop(outline_id)
+    for key in [k for k in _chapters if k[0] == outline_id]:
+        del _chapters[key]
+    _save()
+    delete_novel(novel_key)
+    return {"deleted": outline_id}
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
