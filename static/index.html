@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>自动小说工坊</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">✒️</span> 自动小说工坊</div>
+  <div class="top-actions">
+    <input id="open-id" type="number" min="1" placeholder="小说 ID">
+    <button id="btn-open" class="ghost">打开</button>
+    <button id="btn-new" class="primary">＋ 新建小说</button>
+  </div>
+</header>
+
+<main class="container">
+  <!-- 新建小说 -->
+  <section id="form-view" class="card">
+    <h2>新建小说</h2>
+
+    <div class="grid2">
+      <label>书名 *
+        <input id="f-title" maxlength="100" placeholder="如：剑出白鹤镇">
+      </label>
+      <label>题材
+        <input id="f-genre" list="genre-list" maxlength="50" placeholder="如：玄幻 / 都市 / 科幻">
+        <datalist id="genre-list">
+          <option>玄幻</option><option>都市</option><option>科幻</option><option>武侠</option>
+          <option>悬疑</option><option>言情</option><option>治愈</option><option>历史</option>
+        </datalist>
+      </label>
+    </div>
+
+    <label>故事梗概 *
+      <textarea id="f-synopsis" rows="3" maxlength="5000" placeholder="用一段话概括主线剧情"></textarea>
+    </label>
+
+    <div class="section-head">
+      <h3>章节大纲</h3>
+      <button id="btn-add-chapter" class="ghost small">＋ 添加章节</button>
+    </div>
+    <div id="chapter-rows"></div>
+
+    <div class="section-head"><h3>篇幅</h3></div>
+    <div class="row-inline">
+      <label class="radio"><input type="radio" name="length" value="短篇" checked> 短篇（约 2 万字）</label>
+      <label class="radio"><input type="radio" name="length" value="中篇"> 中篇（约 30 万字）</label>
+      <label class="radio"><input type="radio" name="length" value="长篇"> 长篇（约 110 万字）</label>
+      <label class="custom-chars">自定义总字数
+        <input id="f-total" type="number" min="1" placeholder="留空按档位换算">
+      </label>
+    </div>
+
+    <div class="section-head">
+      <h3>人物 <span class="hint">可选，留空则自动生成</span></h3>
+      <button id="btn-add-character" class="ghost small">＋ 添加人物</button>
+    </div>
+    <div id="character-rows"></div>
+
+    <div class="section-head">
+      <h3>人物关系 <span class="hint">可选</span></h3>
+      <button id="btn-add-relation" class="ghost small">＋ 添加关系</button>
+    </div>
+    <div id="relation-rows"></div>
+
+    <div class="actions">
+      <button id="btn-submit" class="primary big">创建并进入工作台</button>
+    </div>
+  </section>
+
+  <!-- 工作台 -->
+  <section id="work-view" class="hidden">
+    <div class="work-grid">
+      <div class="card">
+        <div class="work-head">
+          <h2 id="work-title"></h2>
+          <div id="work-meta" class="muted"></div>
+        </div>
+        <div class="progress-wrap">
+          <div class="progress"><div id="progress-bar"></div></div>
+          <div id="progress-text" class="muted"></div>
+        </div>
+        <h3 class="list-title">章节</h3>
+        <ul id="chapter-list" class="chapter-list"></ul>
+        <div id="content-box" class="content-box muted">
+          点击章节右侧的「生成」或「查看」，正文会显示在这里。
+        </div>
+      </div>
+      <aside class="side">
+        <div class="card">
+          <h3>人物关系网</h3>
+          <div id="network-box"><div class="muted">加载中…</div></div>
+        </div>
+      </aside>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
