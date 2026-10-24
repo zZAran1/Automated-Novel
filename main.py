@@ -15,13 +15,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAIError
-from pydantic import BaseModel, BeforeValidator, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, ValidationError, model_validator
 
 from characters import MIN_CHARACTERS, build_network, supplement_network
-from config import CHAPTER_TARGET_CHARS, SUMMARY_MAX_CHARS
+from config import CHAPTER_TARGET_CHARS, LENGTH_PRESETS, SUMMARY_MAX_CHARS
 from generator import count_chars, generate_chapter, generate_chapter_stream
 from llm import LLMOutputError
-from memory import delete_novel
+from memory import delete_chapter, delete_novel
+from planner import plan_novel_stream
 
 app = FastAPI(title="Automated Novel API")
 
@@ -51,9 +52,6 @@ def _strip_str(v: Any) -> Any:
 
 
 TrimmedStr = Annotated[str, BeforeValidator(_strip_str)]
-
-# 未规定全文字数时按篇幅档位换算
-LENGTH_PRESETS = {"短篇": 20000, "中篇": 300000, "长篇": 1100000}
 
 
 class ChapterOutline(BaseModel):
@@ -132,6 +130,12 @@ class OutlineIn(BaseModel):
                 "请增加总字数或减少章数"
             )
         return self
+
+
+class PlanIn(BaseModel):
+    """小说描述输入：篇幅由模型根据描述判断，生成完整写作计划。"""
+
+    description: TrimmedStr = Field(..., min_length=1, max_length=10000, description="小说描述")
 
 
 class OutlineOut(BaseModel):
@@ -275,6 +279,38 @@ def create_outline(outline: OutlineIn) -> OutlineOut:
     return OutlineOut(id=outline_id, outline=outline)
 
 
+@app.post(
+    "/outline/plan/stream",
+    summary="由小说描述生成写作计划（SSE）",
+    description=(
+        "输入一段小说描述，由模型判断篇幅并生成题材、故事梗概、章节大纲、人物与人物关系，"
+        "事件类型：progress（生成进度）/ done（生成完成，携带与 /outline 创建入参一致的计划）/"
+        " error（生成失败，携带原因）"
+    ),
+)
+def plan_stream_api(plan_in: PlanIn) -> StreamingResponse:
+    def events():
+        try:
+            for kind, payload in plan_novel_stream(plan_in.description):
+                if kind == "progress":
+                    yield _sse({"type": "progress", "detail": payload})
+                else:  # done：校验计划可直接提交创建
+                    outline = OutlineIn.model_validate(payload)
+                    yield _sse({"type": "done", "outline": outline.model_dump()})
+        except LLMOutputError as e:  # 生成内容不合格即作废
+            yield _sse({"type": "error", "detail": f"写作计划生成失败: {e}"})
+        except ValidationError as e:  # 计划未通过创建入参校验，作废
+            yield _sse({"type": "error", "detail": f"生成的写作计划未通过校验: {e}"})
+        except OpenAIError as e:  # 超时/限流等服务异常，不暴露 500
+            yield _sse({"type": "error", "detail": f"DeepSeek 服务调用失败: {e}"})
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/outline/{outline_id}", response_model=OutlineOut, summary="查询小说大纲")
 def get_outline(outline_id: int) -> OutlineOut:
     if outline_id not in _store:
@@ -391,6 +427,33 @@ def _written_chars(outline_id: int) -> int:
     return sum(ch.char_count for (oid, _), ch in _chapters.items() if oid == outline_id)
 
 
+def _stream_chapter_events(outline_id: int, outline: OutlineIn, no: int, network: dict):
+    """产出一章的流式事件 dict（chapter_start/delta/reset/chapter_done），完成的章节会入库。"""
+    chapter = outline.chapters[no - 1]
+    yield {
+        "type": "chapter_start",
+        "chapter_no": no,
+        "title": chapter.title,
+        "total_chapters": len(outline.chapters),
+    }
+    for kind, payload in generate_chapter_stream(
+        novel_id=_novel_keys[outline_id],
+        chapter_no=no,
+        title=chapter.title,
+        summary=chapter.summary,
+        synopsis=outline.synopsis,
+        genre=outline.genre,
+        network=network,
+    ):
+        if kind == "delta":
+            yield {"type": "delta", "chapter_no": no, "text": payload}
+        elif kind == "reset":
+            yield {"type": "reset", "chapter_no": no, "reason": payload}
+        else:  # done
+            out = _store_chapter(outline_id, no, chapter.title, payload)
+            yield {"type": "chapter_done", "chapter": out.model_dump()}
+
+
 @app.post(
     "/outline/{outline_id}/chapters/generate/auto",
     summary="一键连续自动生成正文（SSE）",
@@ -431,30 +494,10 @@ def generate_auto_api(outline_id: int) -> StreamingResponse:
                         "reason": f"累计字数已达全书目标 {total_chars} 字，剩余章节未生成",
                     })
                     return
-                chapter = outline.chapters[no - 1]
-                yield _sse({
-                    "type": "chapter_start",
-                    "chapter_no": no,
-                    "title": chapter.title,
-                    "total_chapters": len(outline.chapters),
-                })
-                for kind, payload in generate_chapter_stream(
-                    novel_id=_novel_keys[outline_id],
-                    chapter_no=no,
-                    title=chapter.title,
-                    summary=chapter.summary,
-                    synopsis=outline.synopsis,
-                    genre=outline.genre,
-                    network=network,
-                ):
-                    if kind == "delta":
-                        yield _sse({"type": "delta", "chapter_no": no, "text": payload})
-                    elif kind == "reset":
-                        yield _sse({"type": "reset", "chapter_no": no, "reason": payload})
-                    else:  # done
-                        out = _store_chapter(outline_id, no, chapter.title, payload)
+                for ev in _stream_chapter_events(outline_id, outline, no, network):
+                    yield _sse(ev)
+                    if ev["type"] == "chapter_done":
                         generated.append(no)
-                        yield _sse({"type": "chapter_done", "chapter": out.model_dump()})
             yield _sse({
                 "type": "done",
                 "generated": generated,
@@ -463,6 +506,59 @@ def generate_auto_api(outline_id: int) -> StreamingResponse:
                 "reason": "全部缺失章节生成完成",
             })
         except ValueError as e:  # 某章校验失败即停止本次连续生成，已完成章节保留
+            yield _sse({"type": "error", "chapter_no": current_no, "detail": str(e)})
+        except OpenAIError as e:
+            yield _sse({
+                "type": "error",
+                "chapter_no": current_no,
+                "detail": f"DeepSeek 服务调用失败: {e}",
+            })
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post(
+    "/outline/{outline_id}/chapters/{chapter_no}/regenerate/auto",
+    summary="从某章开始重新生成（SSE）",
+    description=(
+        "按章节顺序重写第 chapter_no 章到当前已写进度之间的所有章节："
+        "已写的章节全部重写，中间缺失的章会补写；超出已写进度的章节不补，"
+        "可用一键连续生成接着写。每章事件同一键连续生成接口，done 的 reason 说明本次结果。"
+    ),
+)
+def regenerate_auto_api(outline_id: int, chapter_no: int) -> StreamingResponse:
+    outline, _ = _load_chapter(outline_id, chapter_no)
+    written_nos = sorted(no for (oid, no) in _chapters if oid == outline_id and no >= chapter_no)
+    if not written_nos:
+        raise HTTPException(
+            status_code=400, detail=f"第 {chapter_no} 章及之后还没有已生成的章节，无法重新生成"
+        )
+    # 重写范围：该章起到当前已写进度（最大已写章号）为止，中间缺失的章节一并补写
+    targets = list(range(chapter_no, written_nos[-1] + 1))
+    network = _get_network(outline_id, outline)
+
+    def events():
+        regenerated: list[int] = []
+        current_no = targets[0]
+        try:
+            for no in targets:
+                current_no = no
+                for ev in _stream_chapter_events(outline_id, outline, no, network):
+                    yield _sse(ev)
+                    if ev["type"] == "chapter_done":
+                        regenerated.append(no)
+            yield _sse({
+                "type": "done",
+                "generated": regenerated,
+                "written_chars": _written_chars(outline_id),
+                "total_chars": outline.total_chars or LENGTH_PRESETS[outline.length],
+                "reason": f"第 {chapter_no} 章起到第 {written_nos[-1]} 章已全部重新生成",
+            })
+        except ValueError as e:  # 某章校验失败即停止，已完成章节保留
             yield _sse({"type": "error", "chapter_no": current_no, "detail": str(e)})
         except OpenAIError as e:
             yield _sse({
@@ -490,6 +586,28 @@ def get_chapter(outline_id: int, chapter_no: int) -> ChapterOut:
             status_code=404, detail=f"章节 {outline_id}/{chapter_no} 尚未生成"
         )
     return _chapters[(outline_id, chapter_no)]
+
+
+@app.delete(
+    "/outline/{outline_id}/chapters/{chapter_no}",
+    summary="删除某章正文（大纲保留，后续已生成章节标记为内容过时）",
+)
+def delete_chapter_api(outline_id: int, chapter_no: int) -> dict:
+    _load_chapter(outline_id, chapter_no)  # 先校验大纲存在、章节号在范围内
+    if (outline_id, chapter_no) not in _chapters:
+        raise HTTPException(
+            status_code=404, detail=f"章节 {outline_id}/{chapter_no} 尚未生成"
+        )
+    del _chapters[(outline_id, chapter_no)]
+    _save()
+    delete_chapter(_novel_keys[outline_id], chapter_no)
+    # 本章正文删除后，后面已写的章节基于旧前文生成，提示重新生成
+    return {
+        "deleted": chapter_no,
+        "stale_chapters": sorted(
+            no for (oid, no) in _chapters if oid == outline_id and no > chapter_no
+        ),
+    }
 
 
 @app.get(

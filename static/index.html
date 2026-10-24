@@ -21,6 +21,16 @@
   <section id="form-view" class="card">
     <h2>新建小说</h2>
 
+    <!-- 小说描述窗口：输入想法，自动生成情节、框架、人物与人物关系并直接开写 -->
+    <div class="plan-box">
+      <div class="section-head">
+        <h3>小说描述 <span class="hint">写一句话想法，自动生成情节、章节框架、人物与人物关系（篇幅由 AI 根据描述判断），创建后直接开写</span></h3>
+        <button id="btn-plan" class="primary small">生成内容并开写</button>
+      </div>
+      <textarea id="f-desc" rows="4" maxlength="10000" placeholder="描述你想要的小说，如：外卖员意外获得听见物品心声的能力，靠它卷入一桩失踪案……"></textarea>
+      <div id="plan-status" class="muted"></div>
+    </div>
+
     <div class="grid2">
       <label>书名 *
         <input id="f-title" maxlength="100" placeholder="如：剑出白鹤镇">
@@ -43,6 +53,7 @@
       <button id="btn-add-chapter" class="ghost small">＋ 添加章节</button>
     </div>
     <div id="chapter-rows"></div>
+    <div id="chapter-rows-pager"></div>
 
     <div class="section-head"><h3>篇幅</h3></div>
     <div class="row-inline">
@@ -59,12 +70,14 @@
       <button id="btn-add-character" class="ghost small">＋ 添加人物</button>
     </div>
     <div id="character-rows"></div>
+    <div id="character-rows-pager"></div>
 
     <div class="section-head">
       <h3>人物关系 <span class="hint">可选</span></h3>
       <button id="btn-add-relation" class="ghost small">＋ 添加关系</button>
     </div>
     <div id="relation-rows"></div>
+    <div id="relation-rows-pager"></div>
 
     <div class="actions">
       <button id="btn-submit" class="primary big">创建并进入工作台</button>
@@ -91,6 +104,7 @@
           <button id="btn-auto" class="primary small">⚡ 一键连续生成</button>
         </div>
         <ul id="chapter-list" class="chapter-list"></ul>
+        <div id="chapter-list-pager"></div>
         <div id="content-box" class="content-box muted">
           点击章节右侧的「生成」或「查看」，正文会显示在这里；点击「一键连续生成」会按章节顺序自动补入缺失章节的正文；生成过程中可点「■ 停止」随时中断输出。
         </div>

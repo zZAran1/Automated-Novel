@@ -32,6 +32,44 @@ function toast(msg, type = "info") {
   toastTimer = setTimeout(() => el.classList.add("hidden"), type === "error" ? 6000 : 3500);
 }
 
+/* ---------- 列表分页 ---------- */
+
+// 每页条目数：条目是列表容器的直接子元素，不足一页时分页条自动隐藏
+const PAGE_SIZE = 10;
+const pageState = {}; // 容器 id -> 当前页码（从 1 开始）
+
+// 显示容器内第 page 页的条目（超出范围自动收敛），返回总页数；无分页条的列表不参与分页
+function showPage(containerId, page) {
+  const container = $(containerId);
+  const pager = $(containerId + "-pager");
+  if (!container || !pager) return;
+  const items = [...container.children];
+  const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+  pageState[containerId] = Math.min(Math.max(1, page), totalPages);
+  const start = (pageState[containerId] - 1) * PAGE_SIZE;
+  items.forEach((el, i) => (el.style.display = i >= start && i < start + PAGE_SIZE ? "" : "none"));
+  renderPager(containerId, totalPages);
+}
+
+// 渲染分页条：上一页/下一页 + 页码
+function renderPager(containerId, totalPages) {
+  const pager = $(containerId + "-pager");
+  if (totalPages <= 1) {
+    pager.innerHTML = "";
+    pager.className = "pager hidden";
+    return;
+  }
+  pager.className = "pager";
+  pager.innerHTML = `
+    <button class="ghost small" data-pg="prev">上一页</button>
+    <span class="muted">第 ${pageState[containerId]}/${totalPages} 页</span>
+    <button class="ghost small" data-pg="next">下一页</button>`;
+  pager.querySelector('[data-pg="prev"]').addEventListener("click", () =>
+    showPage(containerId, pageState[containerId] - 1));
+  pager.querySelector('[data-pg="next"]').addEventListener("click", () =>
+    showPage(containerId, pageState[containerId] + 1));
+}
+
 /* ---------- 表单：动态行 ---------- */
 
 function addRow(containerId, fields, cls) {
@@ -41,7 +79,10 @@ function addRow(containerId, fields, cls) {
   row.innerHTML =
     fields.map(([p, max]) => `<input placeholder="${p}" maxlength="${max}">`).join("") +
     `<button class="del" title="删除">✕</button>`;
-  row.querySelector(".del").addEventListener("click", () => row.remove());
+  row.querySelector(".del").addEventListener("click", () => {
+    row.remove();
+    showPage(containerId, pageState[containerId] || 1); // 删空一页后自动收敛页码
+  });
   $(containerId).appendChild(row);
   return row;
 }
@@ -82,58 +123,72 @@ async function loadNovelList() {
 
 /* ---------- 新建小说 ---------- */
 
-async function submitOutline() {
+// 读取表单并构造 /outline 创建入参，校验失败抛 Error
+function collectPayload() {
   const title = $("#f-title").value.trim();
   const synopsis = $("#f-synopsis").value.trim();
-  if (!title) return toast("请填写书名", "error");
-  if (!synopsis) return toast("请填写故事梗概", "error");
+  if (!title) throw new Error("请填写书名");
+  if (!synopsis) throw new Error("请填写故事梗概");
 
+  const chapters = readRows("#chapter-rows", ["title", "summary"], [0]);
+  if (!chapters.length) throw new Error("请至少填写一章章节大纲");
+  const characters = readRows("#character-rows", ["name", "gender", "identity", "personality"], [0]);
+  const relations = readRows("#relation-rows", ["source", "target", "relation"], [0, 1, 2]);
+  const names = new Set();
+  for (const c of characters) {
+    if (names.has(c.name)) throw new Error(`人物「${c.name}」重复，请合并为一个`);
+    names.add(c.name);
+  }
+  for (const r of relations) {
+    for (const end of [r.source, r.target]) {
+      if (!names.has(end)) throw new Error(`人物关系中的「${end}」不在人物列表中`);
+    }
+  }
+  const totalRaw = $("#f-total").value.trim();
+  let totalChars = null;
+  if (totalRaw) {
+    totalChars = Number(totalRaw);
+    if (!Number.isSafeInteger(totalChars) || totalChars <= 0) {
+      throw new Error("「全文字数」必须是大于 0 的整数");
+    }
+  }
+  // 与后端 config.py 的 LENGTH_PRESETS、CHAPTER_TARGET_CHARS[0] 保持一致
+  const PRESETS = { 短篇: 20000, 中篇: 300000, 长篇: 1100000 };
+  const CHAPTER_MIN_CHARS = 1500;
+  const length = document.querySelector("input[name=length]:checked").value;
+  const planTotal = totalChars ?? PRESETS[length];
+  const least = chapters.length * CHAPTER_MIN_CHARS;
+  if (planTotal < least) {
+    throw new Error(
+      `计划全书 ${planTotal} 字与 ${chapters.length} 章不匹配：` +
+      `每章至少约 ${CHAPTER_MIN_CHARS} 字，${chapters.length} 章至少需要约 ${least} 字，请增加总字数或减少章数`
+    );
+  }
+  return {
+    title,
+    genre: $("#f-genre").value.trim(),
+    synopsis,
+    chapters,
+    length,
+    total_chars: totalChars,
+    characters,
+    relations,
+  };
+}
+
+// 创建小说并进入工作台
+async function createNovel(payload) {
+  const out = await api("POST", "/outline", payload);
+  toast(`创建成功，小说 ID：${out.id}`);
+  await enterWorkspace(out.id);
+  loadNovelList();
+  return out;
+}
+
+async function submitOutline() {
   let payload;
   try {
-    const chapters = readRows("#chapter-rows", ["title", "summary"], [0]);
-    if (!chapters.length) throw new Error("请至少填写一章章节大纲");
-    const characters = readRows("#character-rows", ["name", "gender", "identity", "personality"], [0]);
-    const relations = readRows("#relation-rows", ["source", "target", "relation"], [0, 1, 2]);
-    const names = new Set();
-    for (const c of characters) {
-      if (names.has(c.name)) throw new Error(`人物「${c.name}」重复，请合并为一个`);
-      names.add(c.name);
-    }
-    for (const r of relations) {
-      for (const end of [r.source, r.target]) {
-        if (!names.has(end)) throw new Error(`人物关系中的「${end}」不在人物列表中`);
-      }
-    }
-    const totalRaw = $("#f-total").value.trim();
-    let totalChars = null;
-    if (totalRaw) {
-      totalChars = Number(totalRaw);
-      if (!Number.isSafeInteger(totalChars) || totalChars <= 0) {
-        throw new Error("「全文字数」必须是大于 0 的整数");
-      }
-    }
-    // 与后端 main.py 的 LENGTH_PRESETS、config.py 的 CHAPTER_TARGET_CHARS[0] 保持一致
-    const PRESETS = { 短篇: 20000, 中篇: 300000, 长篇: 1100000 };
-    const CHAPTER_MIN_CHARS = 1500;
-    const length = document.querySelector("input[name=length]:checked").value;
-    const planTotal = totalChars ?? PRESETS[length];
-    const least = chapters.length * CHAPTER_MIN_CHARS;
-    if (planTotal < least) {
-      throw new Error(
-        `计划全书 ${planTotal} 字与 ${chapters.length} 章不匹配：` +
-        `每章至少约 ${CHAPTER_MIN_CHARS} 字，${chapters.length} 章至少需要约 ${least} 字，请增加总字数或减少章数`
-      );
-    }
-    payload = {
-      title,
-      genre: $("#f-genre").value.trim(),
-      synopsis,
-      chapters,
-      length,
-      total_chars: totalChars,
-      characters,
-      relations,
-    };
+    payload = collectPayload();
   } catch (e) {
     return toast(e.message, "error");
   }
@@ -142,15 +197,78 @@ async function submitOutline() {
   btn.disabled = true;
   btn.textContent = "创建中…";
   try {
-    const out = await api("POST", "/outline", payload);
-    toast(`创建成功，小说 ID：${out.id}`);
-    await enterWorkspace(out.id);
-    loadNovelList();
+    await createNovel(payload);
   } catch (e) {
     toast(e.message, "error");
   } finally {
     btn.disabled = false;
     btn.textContent = "创建并进入工作台";
+  }
+}
+
+/* ---------- 小说描述窗口 ---------- */
+
+// 把生成的写作计划填入新建表单
+function fillForm(plan) {
+  $("#f-title").value = plan.title;
+  $("#f-genre").value = plan.genre;
+  $("#f-synopsis").value = plan.synopsis;
+  const fillRows = (containerId, fields, keys, rows, cls) => {
+    $(containerId).innerHTML = "";
+    for (const item of rows) {
+      const row = addRow(containerId, fields, cls);
+      const inputs = row.querySelectorAll("input");
+      keys.forEach((k, i) => (inputs[i].value = item[k] ?? ""));
+    }
+    showPage(containerId, 1);
+  };
+  fillRows("#chapter-rows", [["章节标题", 100], ["情节概要", 2500]], ["title", "summary"], plan.chapters, "chapter");
+  fillRows("#character-rows", [["姓名", 20], ["性别", 10], ["身份", 100], ["性格", 200]], ["name", "gender", "identity", "personality"], plan.characters, "character");
+  fillRows("#relation-rows", [["人物A 姓名", 20], ["人物B 姓名", 20], ["关系描述", 200]], ["source", "target", "relation"], plan.relations, "relation");
+  const radio = document.querySelector(`input[name=length][value="${plan.length}"]`);
+  if (radio) radio.checked = true;
+  $("#f-total").value = plan.total_chars ?? "";
+}
+
+// 由小说描述生成写作计划（SSE），返回与 /outline 创建入参一致的计划
+async function streamPlan(body) {
+  const events = await openSse("/outline/plan/stream", body);
+  for await (const ev of events) {
+    if (ev.type === "progress") {
+      $("#plan-status").textContent = ev.detail;
+    } else if (ev.type === "done") {
+      return ev.outline;
+    } else if (ev.type === "error") {
+      throw new Error(ev.detail);
+    }
+  }
+  throw new Error("连接中断，未收到写作计划");
+}
+
+// 生成写作计划并填充表单，创建小说后直接连续生成整本小说；篇幅由模型根据描述判断
+async function planAndStart() {
+  const description = $("#f-desc").value.trim();
+  if (!description) return toast("请先输入小说描述", "error");
+
+  const btn = $("#btn-plan");
+  const status = $("#plan-status");
+  btn.disabled = true;
+  btn.textContent = "生成中…";
+  try {
+    status.textContent = "正在生成写作计划…";
+    const plan = await streamPlan({ description });
+    fillForm(plan);
+    status.textContent = "内容已填充，正在创建小说并开始生成…";
+    const out = await createNovel(collectPayload());
+    status.textContent = "";
+    toast(`《${out.outline.title}》已创建，开始连续生成整本小说`);
+    autoGenerate($("#btn-auto")); // 不等待，逐章流式输出在工作台展示
+  } catch (e) {
+    status.textContent = "";
+    toast(e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "生成内容并开写";
   }
 }
 
@@ -187,17 +305,24 @@ function renderChapters() {
       <div class="ch-title"><b>第${no}章</b> ${ch.title}</div>
       <span class="badge" data-badge="${no}"></span>
       <button class="ghost" data-view="${no}">查看</button>
-      <button class="primary" data-gen="${no}">生成</button>`;
+      <button class="primary" data-gen="${no}">生成</button>
+      <button class="ghost" data-rewrite="${no}" title="重新生成本章及其后到已写进度的所有章节">从本章重写</button>
+      <button class="ghost" data-del="${no}" title="删除本章正文（章节大纲保留）">删除</button>`;
     li.querySelector("[data-gen]").addEventListener("click", (e) => generateChapter(no, e.target));
     li.querySelector("[data-view]").addEventListener("click", () => viewChapter(no));
+    li.querySelector("[data-rewrite]").addEventListener("click", (e) => regenerateFrom(no, e.target));
+    li.querySelector("[data-del]").addEventListener("click", (e) => deleteChapter(no, e.target));
     ul.appendChild(li);
   });
   updateBadges();
+  showPage("#chapter-list", 1);
 }
 
 function updateBadges() {
+  // 章节状态优先取本地缓存，未点开过的章节用字数统计兜底，保证打开工作台时显示准确
+  const statsIndex = new Map((current.stats?.chapters || []).map((c) => [c.chapter_no, c]));
   document.querySelectorAll("[data-badge]").forEach((el) => {
-    const ch = current.chapters[el.dataset.badge];
+    const ch = current.chapters[el.dataset.badge] || statsIndex.get(Number(el.dataset.badge));
     el.textContent = ch ? `${ch.char_count} 字` : "未生成";
   });
 }
@@ -237,8 +362,17 @@ async function generateChapter(no, btn) {
 // 与后端 count_chars 同口径：不计空白字符
 const countChars = (text) => text.replace(/\s/g, "").length;
 
+// reset 事件的原因 -> 提示文案，与后端 generator.py 的重置原因对应
+const RESET_TOASTS = {
+  压缩: "正文超长，自动压缩中…",
+  扩写: "正文偏短，自动扩写中…",
+  重写: "与前面章节高度相似，自动重写中…",
+};
+
 // 当前内容区展示的正文原文，供「复制」按钮取用
 let displayText = "";
+// 当前内容区展示的章节号（0 表示没有展示具体章节），删除章节时用于判断是否清空内容区
+let displayedNo = 0;
 
 // 正文按换行切段渲染为 <p>，段首缩进两字；段内不做二次换行处理
 function renderProse(prose, text) {
@@ -291,13 +425,15 @@ function disableStop() {
   if (stop) stop.disabled = true;
 }
 
-async function openSse(path) {
+async function openSse(path, body) {
   const headers = {};
   if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+  if (body) headers["Content-Type"] = "application/json";
   abortCtrl = new AbortController();
   const res = await fetch(path, {
     method: "POST",
     headers,
+    body: body ? JSON.stringify(body) : undefined,
     signal: abortCtrl.signal,
   });
   if (!res.ok) {
@@ -328,6 +464,7 @@ async function* sseEvents(res) {
 // 把内容区切换为流式输出模式，返回正文区与实时字数徽章；标题栏带「复制」「停止」按钮
 function renderStreaming(no, title, badgePrefix = "") {
   const box = $("#content-box");
+  displayedNo = 0; // 流式输出中的是未入库正文，不算"展示某一章"
   box.className = "content-box";
   box.innerHTML = `
     <h3>第${no}章 ${title}<span class="badge" id="live-badge">生成中…</span><button class="ghost small" id="btn-copy" style="margin-left:8px">复制</button><button class="ghost small" id="btn-stop" style="margin-left:8px">■ 停止</button></h3>
@@ -355,7 +492,7 @@ async function streamChapter(no) {
     } else if (ev.type === "reset") {
       text = "";
       show("");
-      toast(ev.reason === "扩写" ? "正文偏短，自动扩写中…" : "正文超长，自动压缩中…");
+      toast(RESET_TOASTS[ev.reason] || "正在重新生成正文…");
     } else if (ev.type === "done") {
       return ev.chapter;
     } else if (ev.type === "error") {
@@ -365,9 +502,9 @@ async function streamChapter(no) {
   throw new Error("连接中断，未收到生成结果");
 }
 
-// 一键连续生成：按章节顺序补入缺失章节，返回 { generated, written_chars, total_chars, reason, lastChapter }
-async function streamAuto() {
-  const events = await openSse(`/outline/${current.id}/chapters/generate/auto`);
+// 流式连续生成（一键连续生成与从某章重写共用）：返回 { generated, written_chars, total_chars, reason, lastChapter }
+async function streamAuto(path) {
+  const events = await openSse(path);
   const result = { generated: [], lastChapter: null };
   let show = null;
   let text = "";
@@ -384,7 +521,7 @@ async function streamAuto() {
       } else if (ev.type === "reset") {
         text = "";
         show("");
-        toast(ev.reason === "扩写" ? "正文偏短，自动扩写中…" : "正文超长，自动压缩中…");
+        toast(RESET_TOASTS[ev.reason] || "正在重新生成正文…");
       } else if (ev.type === "chapter_done") {
         current.chapters[ev.chapter.chapter_no] = ev.chapter;
         result.generated.push(ev.chapter.chapter_no);
@@ -415,7 +552,7 @@ async function autoGenerate(btn) {
   btn.disabled = true;
   btn.textContent = "生成中…";
   try {
-    const r = await streamAuto();
+    const r = await streamAuto(`/outline/${current.id}/chapters/generate/auto`);
     if (r.lastChapter) renderContent(r.lastChapter);
     await refreshStats();
     loadNetwork();
@@ -438,6 +575,58 @@ async function autoGenerate(btn) {
   }
 }
 
+// 从某章开始重新生成：重写该章起到当前已写进度的所有章节（中间缺失的章会补写）
+async function regenerateFrom(no, btn) {
+  if (!confirm(`从第${no}章开始重新生成？该章起到当前已写进度的章节会按顺序全部重写，中间缺失的章会补写`)) return;
+  btn.disabled = true;
+  btn.textContent = "重写中…";
+  try {
+    const r = await streamAuto(`/outline/${current.id}/chapters/${no}/regenerate/auto`);
+    if (r.lastChapter) renderContent(r.lastChapter);
+    await refreshStats();
+    loadNetwork();
+    toast(`${r.reason}，本次重写 ${r.generated.length} 章`);
+  } catch (e) {
+    if (e.stopped) {
+      markStopped();
+      toast(`已中断重写，本次已完成 ${e.generated.length} 章`);
+    } else {
+      toast(e.message, "error");
+    }
+  } finally {
+    abortCtrl = null;
+    disableStop();
+    updateBadges();
+    refreshStats();
+    btn.disabled = false;
+    btn.textContent = "从本章重写";
+  }
+}
+
+// 删除某章正文（章节大纲保留），后续已写章节提示内容过时
+async function deleteChapter(no, btn) {
+  if (!confirm(`确定删除第${no}章的正文？章节大纲保留，之后可重新生成`)) return;
+  btn.disabled = true;
+  try {
+    const r = await api("DELETE", `/outline/${current.id}/chapters/${no}`);
+    delete current.chapters[no];
+    if (displayedNo === no) renderContent(null); // 正在看的就是被删的这章，清空内容区
+    await refreshStats();
+    updateBadges();
+    toast(`第${no}章正文已删除`);
+    if (r.stale_chapters && r.stale_chapters.length) {
+      toast(
+        `注意：第 ${r.stale_chapters.join("、")} 章基于旧前文生成，建议从第${r.stale_chapters[0]}章开始重新生成`,
+        "error"
+      );
+    }
+  } catch (e) {
+    toast(e.message, "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function viewChapter(no) {
   if (current.chapters[no]) return renderContent(current.chapters[no]);
   try {
@@ -454,11 +643,13 @@ function renderContent(ch) {
   const box = $("#content-box");
   if (!ch) {
     displayText = "";
+    displayedNo = 0;
     box.className = "content-box muted";
     box.textContent = "点击章节右侧的「生成」或「查看」，正文会显示在这里。";
     return;
   }
   displayText = ch.content;
+  displayedNo = ch.chapter_no;
   box.className = "content-box";
   box.innerHTML = `
     <h3>第${ch.chapter_no}章 ${ch.title}<span class="badge">${ch.char_count} 字</span><button class="ghost small" id="btn-copy" style="margin-left:8px">复制</button></h3>
@@ -478,6 +669,7 @@ async function refreshStats() {
   $("#progress-bar").style.width = pct.toFixed(2) + "%";
   $("#progress-text").textContent =
     `已写 ${written_chars.toLocaleString()} / 约 ${total_chars.toLocaleString()} 字（${pct.toFixed(1)}%）`;
+  updateBadges(); // 统计里有各章字数，同步章节状态徽章
 }
 
 async function loadNetwork() {
@@ -494,10 +686,6 @@ async function loadNetwork() {
 
 function renderNetwork(net) {
   const box = $("#network-box");
-  if (!net.characters.length) {
-    box.innerHTML = '<div class="muted">暂无人物</div>';
-    return;
-  }
   const chars = net.characters
     .map((c) => {
       const tags = [c.gender, c.identity].filter(Boolean).map((t) => `<span class="tag">${t}</span>`).join("");
@@ -505,23 +693,34 @@ function renderNetwork(net) {
       return `<div class="char"><b>${c.name}</b>${tags}${desc}</div>`;
     })
     .join("");
-  const relations = net.relations.length
-    ? `<ul class="relation-list">${net.relations
-        .map((r) => `<li><b>${r.from}</b> → <b>${r.to}</b>：${r.relation}</li>`)
-        .join("")}</ul>`
-    : '<div class="muted" style="margin-top:12px">暂无关系</div>';
-  box.innerHTML = chars + relations;
+  const relations = net.relations
+    .map((r) => `<li><b>${r.from}</b> → <b>${r.to}</b>：${r.relation}</li>`)
+    .join("");
+  box.innerHTML = `
+    <div id="network-chars">${chars || '<div class="muted">暂无人物</div>'}</div>
+    <div id="network-chars-pager"></div>
+    <ul id="network-relations" class="relation-list">${relations || '<li class="muted">暂无关系</li>'}</ul>
+    <div id="network-relations-pager"></div>`;
+  showPage("#network-chars", 1);
+  showPage("#network-relations", 1);
 }
 
 /* ---------- 事件绑定 ---------- */
 
-$("#btn-add-chapter").addEventListener("click", () =>
-  addRow("#chapter-rows", [["章节标题", 100], ["情节概要", 2500]], "chapter"));
-$("#btn-add-character").addEventListener("click", () =>
-  addRow("#character-rows", [["姓名", 20], ["性别", 10], ["身份", 100], ["性格", 200]], "character"));
-$("#btn-add-relation").addEventListener("click", () =>
-  addRow("#relation-rows", [["人物A 姓名", 20], ["人物B 姓名", 20], ["关系描述", 200]], "relation"));
+$("#btn-add-chapter").addEventListener("click", () => {
+  addRow("#chapter-rows", [["章节标题", 100], ["情节概要", 2500]], "chapter");
+  showPage("#chapter-rows", Infinity); // 新增行跳到末页，保证能看到
+});
+$("#btn-add-character").addEventListener("click", () => {
+  addRow("#character-rows", [["姓名", 20], ["性别", 10], ["身份", 100], ["性格", 200]], "character");
+  showPage("#character-rows", Infinity);
+});
+$("#btn-add-relation").addEventListener("click", () => {
+  addRow("#relation-rows", [["人物A 姓名", 20], ["人物B 姓名", 20], ["关系描述", 200]], "relation");
+  showPage("#relation-rows", Infinity);
+});
 $("#btn-submit").addEventListener("click", submitOutline);
+$("#btn-plan").addEventListener("click", planAndStart);
 $("#btn-auto").addEventListener("click", (e) => autoGenerate(e.target));
 $("#btn-new").addEventListener("click", () => {
   $("#work-view").classList.add("hidden");

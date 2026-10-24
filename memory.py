@@ -82,6 +82,42 @@ def recall(query: str, novel_id: str, before_chapter: int, k: int = 4) -> list[s
     return res["documents"][0]
 
 
+def load_prev_chapters(novel_id: str, before_chapter: int) -> list[tuple[int, str]]:
+    """取出该小说 chapter_no < before_chapter 的章节全文（切块按序重组），供相似度检测比对。"""
+    col = _collection()
+    if col.count() == 0:
+        return []
+    res = col.get(
+        where={
+            "$and": [
+                {"novel_id": {"$eq": novel_id}},
+                {"chapter_no": {"$lt": before_chapter}},
+            ]
+        },
+        include=["documents", "metadatas"],
+    )
+    # 切块 id 形如 {novel_id}-{chapter_no}-{块序号}，按块序号重组保证章内顺序
+    grouped: dict[int, list[tuple[int, str]]] = {}
+    for doc, meta, id_ in zip(res["documents"], res["metadatas"], res["ids"]):
+        grouped.setdefault(meta["chapter_no"], []).append((int(id_.rsplit("-", 1)[-1]), doc))
+    return [
+        (no, "\n".join(d for _, d in sorted(parts)))
+        for no, parts in sorted(grouped.items())
+    ]
+
+
+def delete_chapter(novel_id: str, chapter_no: int) -> None:
+    """删除该小说某一章的全部向量块（删除某章正文时调用）。"""
+    _collection().delete(
+        where={
+            "$and": [
+                {"novel_id": {"$eq": novel_id}},
+                {"chapter_no": {"$eq": chapter_no}},
+            ]
+        }
+    )
+
+
 def delete_novel(novel_id: str) -> None:
     """删除该小说的全部向量块（删除小说时调用）。"""
     _collection().delete(where={"novel_id": {"$eq": novel_id}})

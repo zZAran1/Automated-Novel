@@ -5,6 +5,15 @@ CHAPTER_TARGET_CHARS = (2000, 2500)
 # 每章正文的参考上限（正文生成校验用），非硬性要求
 CHAPTER_MAX_CHARS = 2500
 # 字数超出参考上限的容忍量：超出不足 1000 字不作废，超出达到 1000 字直接抛异常作废
-CHAPTER_OVERFLOW_TOLERANCE = 1000
+CHAPTER_OVERFLOW_TOLERANCE = 1500
+# 正文相似度上限（0~1）：整章按字符 n-gram Jaccard、段落按 n-gram 包含度与前面章节比对，
+# 达到即视为高度相似，重写后仍相似直接作废
+SIMILARITY_LIMIT = 0.5
+# 相似度检测的字符 n-gram 长度
+SIMILARITY_NGRAM = 4
+# 段落相似度比对的最小字数：短段落（多为对话短句、过场）不参与比对，避免误伤
+PARAGRAPH_MIN_CHARS = 50
 # 章节情节概要的输入长度上限，与正文字数解耦，两者改动互不影响
 SUMMARY_MAX_CHARS = 2500
+# 篇幅档位 -> 计划全文字数：未规定全文字数时按档位换算，小说描述生成计划时也按此换算
+LENGTH_PRESETS = {"短篇": 20000, "中篇": 300000, "长篇": 1100000}

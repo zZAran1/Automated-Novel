@@ -71,6 +71,27 @@ body {
 .card h2 { margin: 0 0 16px; font-size: 18px; }
 .card h3 { margin: 0; font-size: 15px; }
 
+/* 列表分页条 */
+.pager {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  margin: 8px 0 4px;
+}
+
+/* 小说描述窗口 */
+.plan-box {
+  border: 1px dashed var(--primary);
+  background: var(--primary-soft);
+  border-radius: var(--radius);
+  padding: 14px 18px 10px;
+  margin-bottom: 18px;
+}
+.plan-box .section-head { margin: 0 0 8px; }
+.plan-box textarea { background: #fff; }
+.plan-box #plan-status { min-height: 20px; margin: 6px 2px 4px; font-size: 13px; }
+
 /* 表单 */
 label { display: block; margin-bottom: 14px; font-weight: 500; }
 input, textarea {
@@ -172,6 +193,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .chapter-list { list-style: none; margin: 0; padding: 0; }
 .chapter-list li {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
